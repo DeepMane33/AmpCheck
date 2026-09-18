@@ -142,10 +142,10 @@ class AppState: ObservableObject {
     func getAdjustedSettings(for song: Song, amp: GuitarAmp) -> AmpSettings {
         let ideal = song.idealSettings
         
-        var adjustedGain = min(ideal.gain, amp.maxGain)
-        var adjustedBass = amp.hasBassControl ? ideal.bass : 5
+        let adjustedGain = min(ideal.gain, amp.maxGain)
+        let adjustedBass = amp.hasBassControl ? ideal.bass : 5
         var adjustedMid = amp.hasMidControl ? ideal.mid : 5
-        var adjustedTreble = amp.hasTrebleControl ? ideal.treble : 5
+        let adjustedTreble = amp.hasTrebleControl ? ideal.treble : 5
         var adjustedPresence = amp.hasPresenceControl ? ideal.presence : 5
         
         // If gain is too high for amp, compensate with other settings
@@ -259,7 +259,7 @@ struct HomeView: View {
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
     @State private var selectedGenre: String? = nil
-    @State private var isSearchFocused = false
+    @FocusState private var isSearchFocused: Bool
     
     let genres = ["All", "Metal", "Rock", "Punk", "Blues", "Ballad", "Britpop", "Grunge", "Classic Rock"]
     
