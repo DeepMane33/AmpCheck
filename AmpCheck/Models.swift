@@ -12,6 +12,7 @@ struct Song: Identifiable, Codable, Hashable {
     let chords: [Chord]
     let idealSettings: AmpSettings
     let description: String
+    var isCustom: Bool = false
     
     enum Difficulty: String, Codable, CaseIterable {
         case easy = "Easy"
@@ -35,7 +36,7 @@ struct Song: Identifiable, Codable, Hashable {
         }
     }
     
-    init(title: String, artist: String, genre: String, difficulty: Difficulty, chords: [Chord], idealSettings: AmpSettings, description: String) {
+    init(title: String, artist: String, genre: String, difficulty: Difficulty, chords: [Chord], idealSettings: AmpSettings, description: String, isCustom: Bool = false) {
         self.id = UUID()
         self.title = title
         self.artist = artist
@@ -44,6 +45,7 @@ struct Song: Identifiable, Codable, Hashable {
         self.chords = chords
         self.idealSettings = idealSettings
         self.description = description
+        self.isCustom = isCustom
     }
 }
 
@@ -54,8 +56,8 @@ struct Chord: Identifiable, Codable, Hashable {
     let frets: [Int] // -1 for muted, 0 for open, 1-24 for fret positions
     let fingers: [Int] // 0 for no finger, 1-4 for finger numbers
     let isPowerChord: Bool
-    
-    init(name: String, frets: [Int], fingers: [Int] = [], isPowerChord: Bool = false) {
+
+    init(name: String, frets: [Int] = [], fingers: [Int] = [], isPowerChord: Bool = false) {
         self.id = UUID()
         self.name = name
         self.frets = frets
@@ -68,7 +70,20 @@ struct Chord: Identifiable, Codable, Hashable {
     }
 }
 
-// Amp Settings Model
+// Detected chord (experimental, from live mic)
+struct DetectedChord: Identifiable, Codable, Hashable {
+    let id: UUID
+    let name: String
+    let confidence: Double // 0-1
+    let timestamp: Date
+
+    init(name: String, confidence: Double, timestamp: Date = Date()) {
+        self.id = UUID()
+        self.name = name
+        self.confidence = confidence
+        self.timestamp = timestamp
+    }
+}
 struct AmpSettings: Codable, Hashable {
     let gain: Double      // 0-10
     let bass: Double      // 0-10
@@ -187,6 +202,7 @@ struct UserProgress: Codable {
     var skillLevel: SkillLevel
     var playedSongs: [String]
     var favorites: [String]
+    var lastPracticeDate: Date?
     
     enum SkillLevel: String, Codable, CaseIterable {
         case beginner = "Beginner"
@@ -221,7 +237,8 @@ struct UserProgress: Codable {
         longestStreak: 0,
         skillLevel: .beginner,
         playedSongs: [],
-        favorites: []
+        favorites: [],
+        lastPracticeDate: nil
     )
     
     mutating func playSong(_ songTitle: String) {
@@ -229,16 +246,37 @@ struct UserProgress: Codable {
         if !playedSongs.contains(songTitle) {
             playedSongs.append(songTitle)
             songsLearned += 1
+            updateSkillLevel()
         }
-        updateSkillLevel()
     }
-    
-    mutating func incrementStreak() {
-        currentStreak += 1
+
+    /// Records a real practice session (called when an actual metronome
+    /// session starts in Practice Mode). Streaks advance once per day.
+    mutating func recordPracticeSession(songTitle: String, on date: Date = Date()) {
+        playSong(songTitle)
+
+        let calendar = Calendar.current
+        if let last = lastPracticeDate {
+            let days = calendar.dateComponents(
+                [.day],
+                from: calendar.startOfDay(for: last),
+                to: calendar.startOfDay(for: date)
+            ).day ?? 0
+            if days == 0 {
+                // Already counted today — don't inflate the streak.
+            } else if days == 1 {
+                currentStreak += 1
+            } else {
+                currentStreak = 1
+            }
+        } else {
+            currentStreak = 1
+        }
+
         if currentStreak > longestStreak {
             longestStreak = currentStreak
         }
-        daysPlayed += 1
+        lastPracticeDate = date
     }
     
     mutating func updateSkillLevel() {
@@ -524,6 +562,102 @@ extension GuitarAmp {
             features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: true, canDoMetal: false, hasEffects: false, hasReverb: false, hasDelay: false),
             maxGain: 8,
             description: "Tiny but powerful tube hybrid. Great crunch tones."
+        ),
+        GuitarAmp(
+            name: "Twin Reverb",
+            brand: "Fender",
+            watts: 85,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: false, canDoMetal: false, hasEffects: true, hasReverb: true, hasDelay: false),
+            maxGain: 5,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: false,
+            description: "Legendary clean platform. Huge headroom, classic reverb. No high-gain channel."
+        ),
+        GuitarAmp(
+            name: "AC30",
+            brand: "Vox",
+            watts: 30,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: false, canDoMetal: false, hasEffects: false, hasReverb: false, hasDelay: false),
+            maxGain: 6,
+            hasBassControl: true,
+            hasMidControl: false,
+            hasTrebleControl: true,
+            hasPresenceControl: false,
+            description: "British chime. Top Boost; no mid knob — uses a 'Cut' control instead."
+        ),
+        GuitarAmp(
+            name: "Dual Rectifier",
+            brand: "Mesa Boogie",
+            watts: 100,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: true, canDoMetal: true, hasEffects: false, hasReverb: false, hasDelay: false),
+            maxGain: 10,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: true,
+            description: "High-gain monster. Channel switching; brutal metal tones."
+        ),
+        GuitarAmp(
+            name: "6505",
+            brand: "Peavey",
+            watts: 120,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: true, canDoMetal: true, hasEffects: false, hasReverb: false, hasDelay: false),
+            maxGain: 10,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: true,
+            description: "Metal standard. Aggressive high gain; clean channel is limited."
+        ),
+        GuitarAmp(
+            name: "JC-120",
+            brand: "Roland",
+            watts: 120,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: false, canDoHighGain: false, canDoMetal: false, hasEffects: true, hasReverb: true, hasDelay: false),
+            maxGain: 2,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: false,
+            description: "Solid-state clean king. Built-in chorus; no distortion."
+        ),
+        GuitarAmp(
+            name: "Rockerverb 50",
+            brand: "Orange",
+            watts: 50,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: true, canDoMetal: true, hasEffects: false, hasReverb: true, hasDelay: false),
+            maxGain: 9,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: false,
+            description: "Versatile tube head. Great crunch and reverb; no presence knob."
+        ),
+        GuitarAmp(
+            name: "Spider V 60",
+            brand: "Line 6",
+            watts: 60,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: true, canDoMetal: true, hasEffects: true, hasReverb: true, hasDelay: true),
+            maxGain: 10,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: false,
+            description: "Modeling amp. Many amp models + effects; menu-driven controls."
+        ),
+        GuitarAmp(
+            name: "THR30II",
+            brand: "Yamaha",
+            watts: 30,
+            features: AmpFeatures(canDoClean: true, canDoCrunch: true, canDoHighGain: true, canDoMetal: true, hasEffects: true, hasReverb: true, hasDelay: true),
+            maxGain: 9,
+            hasBassControl: true,
+            hasMidControl: true,
+            hasTrebleControl: true,
+            hasPresenceControl: false,
+            description: "Desktop practice amp. Wireless, modeling, effects built-in."
         )
     ]
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - 🎸 AmpCheck App
 
@@ -17,12 +18,37 @@ struct AmpCheckApp: App {
 // MARK: - 📱 App State
 
 class AppState: ObservableObject {
-    @Published var selectedAmp: GuitarAmp?
-    @Published var userProgress: UserProgress
-    @Published var assessment: AmpAssessment
+    private let storageKey = "ampcheck.state.v2"
+
+    private struct StoredState: Codable {
+        var ampName: String?
+        var progress: UserProgress?
+        var assessment: AmpAssessment?
+        var hapticEnabled: Bool?
+        var visualMode: Bool?
+        var toneReport: ToneReport?
+        var customAmps: [GuitarAmp]?
+        var customSongs: [Song]?
+    }
+
+    @Published var selectedAmp: GuitarAmp? { didSet { save() } }
+    @Published var userProgress: UserProgress { didSet { save() } }
+    @Published var assessment: AmpAssessment { didSet { save() } }
     @Published var selectedTab: Tab
-    @Published var hapticEnabled: Bool
-    @Published var visualMode: Bool
+    @Published var hapticEnabled: Bool { didSet { save() } }
+    @Published var visualMode: Bool { didSet { save() } }
+
+    /// The last real measured tone report from the Sound Test, so the amp's
+    /// capability profile is always visible on the My Amp tab.
+    @Published var toneReport: ToneReport? { didSet { save() } }
+
+    /// The last real measured tone report from the Sound Test, so the amp's
+    /// capability profile is always visible on the My Amp tab.
+    @Published var customAmps: [GuitarAmp] { didSet { save() } }
+    @Published var customSongs: [Song] { didSet { save() } }
+
+    var availableAmps: [GuitarAmp] { GuitarAmp.sampleAmps + customAmps }
+    var availableSongs: [Song] { Song.sampleSongs + customSongs }
     
     enum Tab: Int, CaseIterable {
         case home = 0
@@ -59,6 +85,53 @@ class AppState: ObservableObject {
         self.selectedTab = .home
         self.hapticEnabled = true
         self.visualMode = true
+        self.customAmps = []
+        self.customSongs = []
+
+        // Restore previously saved state (amp, progress, streaks, settings).
+        if let data = UserDefaults.standard.data(forKey: storageKey) {
+            let stored = try? JSONDecoder().decode(StoredState.self, from: data)
+            if let name = stored?.ampName,
+               let amp = availableAmps.first(where: { $0.name == name }) {
+                self.selectedAmp = amp
+            }
+            if let progress = stored?.progress {
+                self.userProgress = progress
+            }
+            if let assessment = stored?.assessment {
+                self.assessment = assessment
+            }
+            if let haptic = stored?.hapticEnabled {
+                self.hapticEnabled = haptic
+            }
+            if let visual = stored?.visualMode {
+                self.visualMode = visual
+            }
+            if let report = stored?.toneReport {
+                self.toneReport = report
+            }
+            if let amps = stored?.customAmps {
+                self.customAmps = amps
+            }
+            if let songs = stored?.customSongs {
+                self.customSongs = songs
+            }
+        }
+    }
+
+    private func save() {
+        let stored = StoredState(
+            ampName: selectedAmp?.name,
+            progress: userProgress,
+            assessment: assessment,
+            hapticEnabled: hapticEnabled,
+            visualMode: visualMode,
+            toneReport: toneReport,
+            customAmps: customAmps,
+            customSongs: customSongs
+        )
+        guard let data = try? JSONEncoder().encode(stored) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
     }
     
     func calculateCompatibility(for song: Song, amp: GuitarAmp) -> CompatibilityResult {
@@ -260,11 +333,13 @@ struct HomeView: View {
     @State private var searchText = ""
     @State private var selectedGenre: String? = nil
     @FocusState private var isSearchFocused: Bool
+    @State private var showingAddSong = false
+    @State private var showingSongAnalyzer = false
     
     let genres = ["All", "Metal", "Rock", "Punk", "Blues", "Ballad", "Britpop", "Grunge", "Classic Rock"]
     
     var filteredSongs: [Song] {
-        var songs = Song.sampleSongs
+        var songs = appState.availableSongs
         
         if let genre = selectedGenre, genre != "All" {
             songs = songs.filter { $0.genre == genre }
@@ -326,6 +401,31 @@ struct HomeView: View {
                                     .glassStyle(cornerRadius: 12)
                                 }
                             }
+
+                            Button(action: { showingAddSong = true }) {
+                                VStack(spacing: 4) {
+                                    Text("➕")
+                                        .font(.system(size: 24))
+                                    Text("Add Song")
+                                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                                        .foregroundColor(.ampPurple)
+                                }
+                                .padding()
+                                .glassStyle(cornerRadius: 12)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            Button(action: { showingSongAnalyzer = true }) {
+                                VStack(spacing: 4) {
+                                    Text("🎵")
+                                        .font(.system(size: 24))
+                                    Text("Analyze Song")
+                                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                                        .foregroundColor(.ampPurple)
+                                }
+                                .padding()
+                                .glassStyle(cornerRadius: 12)
+                            }
+                            .buttonStyle(PlainButtonStyle())
                         }
                     }
                     .padding(.horizontal)
@@ -410,6 +510,12 @@ struct HomeView: View {
                 }
             }
             .navigationBarHidden(true)
+            .sheet(isPresented: $showingAddSong) {
+                CustomSongView()
+            }
+            .sheet(isPresented: $showingSongAnalyzer) {
+                SongAnalyzerView()
+            }
         }
     }
 }
@@ -420,6 +526,7 @@ struct AmpSetupView: View {
     @EnvironmentObject var appState: AppState
     @State private var selectedAmpIndex: Int? = nil
     @State private var showingAssessment = false
+    @State private var showingCustomAmp = false
     
     var body: some View {
         NavigationView {
@@ -479,8 +586,91 @@ struct AmpSetupView: View {
                         .glassStyle(cornerRadius: 20)
                         .padding(.horizontal)
                     }
-                    
-                    // Amp list
+
+                    // Measured tone profile (from a real Sound Test run)
+                    if let report = appState.toneReport {
+                        VStack(spacing: 16) {
+                            HStack {
+                                Text("🎙️ Measured Tone Profile")
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                Text("⭐ \(report.qualityLabel)")
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.ampMint)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Capsule().fill(Color.ampMint.opacity(0.15)))
+                            }
+
+                            Text("“\(report.toneCharacter)”")
+                                .font(.system(size: 20, weight: .bold, design: .rounded))
+                                .foregroundColor(.ampPurple)
+
+                            HStack(spacing: 14) {
+                                FrequencyVisualizer(
+                                    bass: report.bass,
+                                    mid: report.mid,
+                                    treble: report.treble,
+                                    label: "Measured"
+                                )
+                            }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                ShareRow(name: "BASS", share: report.bassShare, color: .ampPink)
+                                ShareRow(name: "MID", share: report.midShare, color: .ampPurple)
+                                ShareRow(name: "TREBLE", share: report.trebleShare, color: .ampBlue)
+                            }
+                            .padding(10)
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.3)))
+
+                            Text(String(format: "Based on %.1f s across %d chord strikes · tone center ≈ %d Hz", report.seconds, report.strikes, Int(report.centroidHz)))
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundColor(.textSecondary)
+
+                            Text(String(format: "Sustain ≈ %.1f s · dynamics %.1fx", report.sustainSeconds, report.dynamics))
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundColor(.textSecondary)
+
+                            Text(report.consistencyLabel)
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundColor((report.consistency ?? 1) >= 0.6 ? .ampMint : .ampPeach)
+                                .multilineTextAlignment(.center)
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(report.genreFit, id: \.self) { fit in
+                                    HStack(spacing: 8) {
+                                        Text("🎸")
+                                        Text(fit)
+                                            .font(.system(size: 12, design: .rounded))
+                                            .foregroundColor(.textSecondary)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Text("Measure again after changing knobs to compare — same guitar, same volume, only the knob changes.")
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                                .multilineTextAlignment(.center)
+
+                            Button(action: {
+                                appState.selectedTab = .soundTest
+                            }) {
+                                Text("Run a new measurement")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    .background(Capsule().fill(
+                                        LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .leading, endPoint: .trailing)
+                                    ))
+                            }
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 20)
+                        .padding(.horizontal)
+                    }
                     VStack(spacing: 12) {
                         Text("Available Amps")
                             .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -488,11 +678,11 @@ struct AmpSetupView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal)
                         
-                        ForEach(GuitarAmp.sampleAmps) { amp in
+                        ForEach(appState.availableAmps) { amp in
                             Button(action: {
                                 withAnimation(.spring(response: 0.3)) {
                                     appState.selectedAmp = amp
-                                    selectedAmpIndex = GuitarAmp.sampleAmps.firstIndex(where: { $0.id == amp.id })
+                                    selectedAmpIndex = appState.availableAmps.firstIndex(where: { $0.id == amp.id })
                                 }
                             }) {
                                 AmpCard(
@@ -507,6 +697,23 @@ struct AmpSetupView: View {
                     }
                     .padding(.horizontal)
                     
+                    // Build your own amp (for amps not in the list)
+                    Button(action: { showingCustomAmp = true }) {
+                        HStack {
+                            Text("🛠️")
+                            Text("Build Your Own Amp")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .foregroundColor(.ampPurple)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.textSecondary)
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 16)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.horizontal)
+
                     // Condition assessment summary
                     if appState.selectedAmp != nil {
                         VStack(spacing: 16) {
@@ -541,6 +748,9 @@ struct AmpSetupView: View {
             .navigationBarHidden(true)
             .sheet(isPresented: $showingAssessment) {
                 AssessmentView()
+            }
+            .sheet(isPresented: $showingCustomAmp) {
+                CustomAmpView()
             }
         }
     }
@@ -920,7 +1130,7 @@ struct SongDetailView: View {
                                 Text("💡 Tips")
                                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                                     .foregroundColor(.textPrimary)
-                                
+
                                 ForEach(result.recommendations, id: \.self) { rec in
                                     HStack(spacing: 8) {
                                         Circle()
@@ -936,6 +1146,48 @@ struct SongDetailView: View {
                             .padding()
                             .background(RoundedRectangle(cornerRadius: 12).fill(Color.ampMint.opacity(0.1)))
                         }
+
+                        // Amp capability verdict (controls + features + measured tone)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("🎛️ Amp Capability Check")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .foregroundColor(.textPrimary)
+
+                            let missingControls = [
+                                (!amp.hasBassControl && song.idealSettings.bass != 5) ? "Bass" : nil,
+                                (!amp.hasMidControl && song.idealSettings.mid != 5) ? "Mid" : nil,
+                                (!amp.hasTrebleControl && song.idealSettings.treble != 5) ? "Treble" : nil,
+                                (!amp.hasPresenceControl && song.idealSettings.presence > 6) ? "Presence" : nil
+                            ].compactMap { $0 }
+
+                            if missingControls.isEmpty {
+                                Text("✅ Your amp has every control this song's tone needs. Dial the settings below and you're set.")
+                                    .font(.system(size: 12, design: .rounded))
+                                    .foregroundColor(.ampMint)
+                            } else {
+                                Text("⚠️ Missing on your amp: \(missingControls.joined(separator: ", ")). The app has compensated in the settings below (e.g. use your guitar's tone knob).")
+                                    .font(.system(size: 12, design: .rounded))
+                                    .foregroundColor(.ampPeach)
+                            }
+
+                            if let report = appState.toneReport {
+                                let similarity = 100 - abs(report.bass - song.idealSettings.bass) * 5
+                                    - abs(report.mid - song.idealSettings.mid) * 5
+                                    - abs(report.treble - song.idealSettings.treble) * 5
+                                Text(String(format: "Your measured tone vs. this song: %.0f%% match. %s",
+                                           max(0, min(100, similarity)),
+                                           similarity >= 70 ? "Close — small knob tweaks should get you there." : "Farther apart — expect to adjust gain/EQ significantly."))
+                                    .font(.system(size: 12, design: .rounded))
+                                    .foregroundColor(.textSecondary)
+                            } else {
+                                Text("Run a Sound Test to compare your measured tone against this song's ideal.")
+                                    .font(.system(size: 11, design: .rounded))
+                                    .foregroundColor(.textSecondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.ampBlue.opacity(0.1)))
                     }
                     .padding()
                     .glassStyle(cornerRadius: 20)
@@ -983,11 +1235,20 @@ struct SongDetailView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 16) {
                             ForEach(song.chords) { chord in
-                                ChordShape(chordName: chord.name, isActive: false)
+                                VStack(spacing: 8) {
+                                    Text(chord.name)
+                                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                                        .foregroundColor(.textPrimary)
+
+                                    FretDiagramView(chord: chord)
+                                        .frame(width: 110, height: 130)
+                                }
+                                .neuStyle(cornerRadius: 16)
+                                .padding(6)
                             }
                         }
                     }
-                    
+
                     Text(song.description)
                         .font(.system(size: 13, design: .rounded))
                         .foregroundColor(.textSecondary)
@@ -1079,17 +1340,22 @@ struct SongDetailView: View {
     }
 }
 
-// MARK: - 🔊 Sound Test View
+// MARK: - 🔊 Sound Test View (real mic analysis, long-session)
 
 struct SoundTestView: View {
     @EnvironmentObject var appState: AppState
-    @State private var isRecording = false
-    @State private var recordedBass: Double = 5
-    @State private var recordedMid: Double = 5
-    @State private var recordedTreble: Double = 5
+    @StateObject private var analyzer = AudioAnalyzer()
     @State private var hapticModeEnabled = false
-    @State private var showingResults = false
-    
+    @State private var showingDetector = false
+
+    private var hasResult: Bool {
+        analyzer.phase == .done && analyzer.result != nil
+    }
+
+    private var notEnough: Bool {
+        analyzer.phase == .tooQuiet && analyzer.result == nil
+    }
+
     var body: some View {
         NavigationView {
             ScrollView(.vertical, showsIndicators: false) {
@@ -1098,40 +1364,60 @@ struct SoundTestView: View {
                     SectionHeader(
                         emoji: "🔊",
                         title: "Sound Test",
-                        subtitle: "Let your phone listen to your amp"
+                        subtitle: "Deep spectrum analysis of your amp"
                     )
                     .padding(.horizontal)
-                    
+                    Button(action: { showingDetector = true }) {
+                        HStack {
+                            Text("🎼")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Chord Detective (experimental)")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.textPrimary)
+                                Text("Play chords one at a time — the app guesses each chord. Best on clean single chords.")
+                                    .font(.system(size: 11, design: .rounded))
+                                    .foregroundColor(.textSecondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.textSecondary)
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 16)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.horizontal)
+
                     // How it works
                     VStack(spacing: 16) {
                         Text("How It Works")
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundColor(.textPrimary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        
+
                         HStack(spacing: 16) {
-                            StepCard(number: "1", emoji: "🎛️", text: "Set your amp to neutral settings")
-                            StepCard(number: "2", emoji: "🎸", text: "Play a chord on your guitar")
-                            StepCard(number: "3", emoji: "📱", text: "App listens and analyzes")
+                            StepCard(number: "1", emoji: "🎛️", text: "Set your amp once, keep knobs untouched")
+                            StepCard(number: "2", emoji: "🎸", text: "Keep playing chords — short pauses between them")
+                            StepCard(number: "3", emoji: "📱", text: "Each chord strike gets scored separately")
                         }
+
+                        Text("More audio = better stats. 3s is the minimum, 12s+ is excellent. Nothing is ever invented.")
+                            .font(.system(size: 11, design: .rounded))
+                            .foregroundColor(.textSecondary)
+                            .multilineTextAlignment(.center)
                     }
                     .padding()
                     .glassStyle(cornerRadius: 20)
                     .padding(.horizontal)
-                    
+
                     // Test button
                     Button(action: {
                         withAnimation {
-                            isRecording.toggle()
-                            if isRecording {
-                                // Simulate recording
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                    isRecording = false
-                                    recordedBass = Double.random(in: 3...8)
-                                    recordedMid = Double.random(in: 3...7)
-                                    recordedTreble = Double.random(in: 4...8)
-                                    showingResults = true
-                                }
+                            switch analyzer.phase {
+                            case .idle, .denied, .failed, .done:
+                                analyzer.start()
+                            case .requesting, .listening, .tooQuiet:
+                                if canFinish { analyzer.stop() }
                             }
                         }
                     }) {
@@ -1139,71 +1425,259 @@ struct SoundTestView: View {
                             ZStack {
                                 Circle()
                                     .fill(
-                                        isRecording ?
+                                        isTestActive ?
                                         LinearGradient(colors: [.ampPink, .ampPurple], startPoint: .topLeading, endPoint: .bottomTrailing) :
                                         LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .topLeading, endPoint: .bottomTrailing)
                                     )
                                     .frame(width: 100, height: 100)
-                                    .shadow(color: isRecording ? .ampPink.opacity(0.5) : .ampPurple.opacity(0.3), radius: 15)
-                                
-                                if isRecording {
+                                    .shadow(color: isTestActive ? .ampPink.opacity(0.5) : .ampPurple.opacity(0.3), radius: 15)
+
+                                if isTestActive {
                                     Circle()
                                         .stroke(Color.ampPink, lineWidth: 3)
                                         .frame(width: 120, height: 120)
                                         .opacity(0.5)
-                                        .scaleEffect(isRecording ? 1.2 : 1.0)
-                                        .animation(.easeInOut(duration: 1).repeatForever(autoreverses: true), value: isRecording)
+                                        .scaleEffect(analyzer.phase == .listening ? 1.2 : 1.0)
+                                        .animation(.easeInOut(duration: 1).repeatForever(autoreverses: true), value: analyzer.phase == .listening)
                                 }
-                                
-                                Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+
+                                Image(systemName: isTestActive ? "stop.fill" : "mic.fill")
                                     .font(.system(size: 32))
                                     .foregroundColor(.white)
                             }
-                            
-                            Text(isRecording ? "Listening... 🔴" : "Start Test 🎸")
+
+                            Text(buttonLabel)
                                 .font(.system(size: 16, weight: .bold, design: .rounded))
                                 .foregroundColor(.textPrimary)
-                            
-                            Text(isRecording ? "Play a chord on your guitar" : "Tap to begin")
+
+                            Text(statusMessage)
                                 .font(.system(size: 12, design: .rounded))
-                                .foregroundColor(.textSecondary)
+                                .foregroundColor(statusColor)
+                                .multilineTextAlignment(.center)
                         }
                     }
                     .buttonStyle(PlainButtonStyle())
+                    .disabled(isTestActive && !canFinish)
                     .padding()
-                    
-                    // Results
-                    if showingResults {
+
+                    // Problem states
+                    if analyzer.phase == .denied {
+                        warningCard(
+                            icon: "🎙️",
+                            title: "Microphone access needed",
+                            body: "AmpCheck can only analyze sound it can hear. Enable microphone access in Settings."
+                        ) {
+                            Button(action: {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            }) {
+                                Text("Open Settings")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    .background(Capsule().fill(Color.ampPurple))
+                            }
+                        }
+                    }
+
+                    if analyzer.phase == .failed {
+                        warningCard(
+                            icon: "⚠️",
+                            title: "Couldn't start the microphone",
+                            body: "The audio engine failed to start. Try again, or check that no other app is using the mic."
+                        )
+                    }
+
+                    if notEnough {
+                        warningCard(
+                            icon: "🤫",
+                            title: String(format: "Only %.1f s of real audio was measured", analyzer.audibleSeconds),
+                            body: "The mic hears your room, but not enough of your playing. Keep strumming chords near the phone until the counter below passes 3 s — then finish. No results are guessed."
+                        )
+                    }
+
+                    // Live deep-analysis card
+                    if isTestActive {
                         VStack(spacing: 16) {
-                            Text("📊 Analysis Results")
+                            HStack {
+                                Text("📊 Live Analysis")
+                                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                HStack(spacing: 8) {
+                                    Text(qualityBadge)
+                                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.ampMint)
+                                    Text("\(Int(analyzer.liveLevel * 100))% lvl")
+                                        .font(.system(size: 12, design: .rounded))
+                                        .foregroundColor(.textSecondary)
+                                }
+                            }
+
+                            // Session stats
+                            HStack(spacing: 12) {
+                                LiveStatChip(icon: "⏱️", value: String(format: "%.1f s", analyzer.audibleSeconds), label: "measured")
+                                LiveStatChip(icon: "🎸", value: "\(analyzer.strikeCount)", label: "strikes")
+                                if analyzer.liveCentroidHz > 0 {
+                                    LiveStatChip(icon: "🎯", value: "\(Int(analyzer.liveCentroidHz)) Hz", label: "tone center")
+                                }
+                            }
+
+                            Text("🎸 Keep playing chords — each new strike sharpens the reading. Press Finish when you've played enough (≥5 s).")
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 6)
+
+                            // Accuracy meter: how solid the reading is so far
+                            VStack(spacing: 6) {
+                                HStack {
+                                    Text("Reading accuracy")
+                                        .font(.system(size: 12, design: .rounded))
+                                        .foregroundColor(.textSecondary)
+                                    Spacer()
+                                    Text("5s min · 8s good · 15s+ excellent")
+                                        .font(.system(size: 11, design: .rounded))
+                                        .foregroundColor(.textSecondary)
+                                }
+                                ProgressBar(value: min(1.0, analyzer.audibleSeconds / 15.0))
+                            }
+
+                            // Last measured chord strike
+                            if let strike = analyzer.lastStrike {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "music.note")
+                                        .foregroundColor(.ampPurple)
+                                    Text("Strike #\(analyzer.strikeCount):")
+                                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.textPrimary)
+                                    Text(String(format: "B %.1f · M %.1f · T %.1f", strike.bass, strike.mid, strike.treble))
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundColor(.textSecondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(10)
+                                .background(RoundedRectangle(cornerRadius: 12).fill(Color.ampPurple.opacity(0.08)))
+                            }
+
+                            if analyzer.strikeCount >= 2 {
+                                Text("Repeatability check active — if each strike scores similarly, the reading is trustworthy.")
+                                    .font(.system(size: 11, design: .rounded))
+                                    .foregroundColor(.textSecondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 20)
+                        .padding(.horizontal)
+                    }
+
+                    // Results
+                    if hasResult, let report = analyzer.result {
+                        VStack(spacing: 16) {
+                            Text("📊 Measured Report")
                                 .font(.system(size: 18, weight: .bold, design: .rounded))
                                 .foregroundColor(.textPrimary)
-                            
+
+                            Text("“\(report.toneCharacter)”")
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                                .foregroundColor(.ampPurple)
+                                .multilineTextAlignment(.center)
+
                             FrequencyVisualizer(
-                                bass: recordedBass,
-                                mid: recordedMid,
-                                treble: recordedTreble,
-                                label: "Your Amp Output"
+                                bass: report.bass,
+                                mid: report.mid,
+                                treble: report.treble,
+                                label: "Your Amp Output (measured)"
                             )
-                            
+
+                            // Measured energy shares (the raw truth)
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("What This Means:")
+                                ShareRow(name: "BASS (40–250 Hz)", share: report.bassShare, color: .ampPink)
+                                ShareRow(name: "MID (250–2 kHz)", share: report.midShare, color: .ampPurple)
+                                ShareRow(name: "TREBLE (2–8 kHz)", share: report.trebleShare, color: .ampBlue)
+                            }
+                            .padding()
+                            .glassStyle(cornerRadius: 12)
+
+                            // Stats grid
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                                StatTile(title: "Quality", value: report.qualityLabel, color: .ampMint)
+                                StatTile(title: "Audio analyzed", value: String(format: "%.1f s", report.seconds), color: .ampBlue)
+                                StatTile(title: "Chord strikes", value: "\(report.strikes)", color: .ampPurple)
+                                StatTile(title: "Tone center", value: "\(Int(report.centroidHz)) Hz", color: .ampPeach)
+                                StatTile(title: "Sustain", value: String(format: "%.1f s", report.sustainSeconds), color: .ampPink)
+                                StatTile(title: "Dynamics", value: String(format: "%.1fx", report.dynamics), color: .ampMint)
+                            }
+
+                            Text(report.consistencyLabel)
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundColor((report.consistency ?? 1) >= 0.6 ? .ampMint : .ampPeach)
+                                .multilineTextAlignment(.center)
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("What this says about your amp:")
                                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                                     .foregroundColor(.textPrimary)
-                                
-                                Text(analyzeResults())
+
+                                Text(interpretation(report))
                                     .font(.system(size: 12, design: .rounded))
                                     .foregroundColor(.textSecondary)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding()
                             .background(RoundedRectangle(cornerRadius: 12).fill(Color.ampMint.opacity(0.1)))
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Looks best suited for:")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.textPrimary)
+
+                                ForEach(report.genreFit, id: \.self) { fit in
+                                    HStack(spacing: 8) {
+                                        Text("🎸")
+                                        Text(fit)
+                                            .font(.system(size: 12, design: .rounded))
+                                            .foregroundColor(.textSecondary)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Color.ampPurple.opacity(0.1)))
+
+                            if report.level < 0.35 {
+                                Text("⚠️ Level was low (\(Int(report.level * 100))%). For a more reliable result, play louder and closer to the phone, then measure again.")
+                                    .font(.system(size: 11, design: .rounded))
+                                    .foregroundColor(.ampPeach)
+                                    .multilineTextAlignment(.center)
+                            }
+
+                            Text("Saved to My Amp ✓ — you can compare later tests by changing only the knobs.")
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                                .multilineTextAlignment(.center)
+
+                            Button(action: { analyzer.start() }) {
+                                Text("Measure Again 🔁")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 20)
+                                    .padding(.vertical, 10)
+                                    .background(
+                                        Capsule().fill(
+                                            LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .leading, endPoint: .trailing)
+                                        )
+                                    )
+                            }
                         }
                         .padding()
                         .glassStyle(cornerRadius: 20)
                         .padding(.horizontal)
                     }
-                    
+
                     // Haptic mode
                     VStack(spacing: 16) {
                         HStack {
@@ -1211,35 +1685,41 @@ struct SoundTestView: View {
                                 Text("📳 Haptic Mode")
                                     .font(.system(size: 16, weight: .bold, design: .rounded))
                                     .foregroundColor(.textPrimary)
-                                
-                                Text("Feel your tone through vibrations")
+
+                                Text("Real vibrations driven by the live mic signal")
                                     .font(.system(size: 12, design: .rounded))
                                     .foregroundColor(.textSecondary)
                             }
-                            
+
                             Spacer()
-                            
+
                             Toggle("", isOn: $hapticModeEnabled)
                                 .labelsHidden()
                                 .tint(.ampPurple)
                         }
-                        
+
                         if hapticModeEnabled {
                             VStack(spacing: 12) {
-                                Text("How it works:")
+                                Text("While the test listens, your phone vibrates with the actual tone it measures:")
                                     .font(.system(size: 12, weight: .medium, design: .rounded))
                                     .foregroundColor(.textSecondary)
-                                
+
                                 HStack(spacing: 16) {
-                                    HapticExample(emoji: "📳", label: "Strong", meaning: "Bass is high")
-                                    HapticExample(emoji: "〰️", label: "Medium", meaning: "Mids are balanced")
-                                    HapticExample(emoji: "✨", label: "Light/Fast", meaning: "Treble is high")
+                                    HapticExample(emoji: "📳", label: "Strong", meaning: "Measured bass energy")
+                                    HapticExample(emoji: "〰️", label: "Medium", meaning: "Measured mids")
+                                    HapticExample(emoji: "✨", label: "Light tick", meaning: "Measured treble")
                                 }
-                                
-                                Text("Play your guitar and feel how the vibrations change based on your tone!")
+
+                                Text("For hearing-impaired players: play a chord and feel the difference as you turn the bass or treble knobs.")
                                     .font(.system(size: 11, design: .rounded))
                                     .foregroundColor(.textSecondary)
                                     .multilineTextAlignment(.center)
+
+                                if isTestActive {
+                                    Text("Haptics are LIVE — keep playing!")
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundColor(.ampPurple)
+                                }
                             }
                             .padding()
                             .glassStyle(cornerRadius: 12)
@@ -1248,42 +1728,218 @@ struct SoundTestView: View {
                     .padding()
                     .glassStyle(cornerRadius: 20)
                     .padding(.horizontal)
-                    
+
                     Spacer(minLength: 100)
                 }
             }
             .navigationBarHidden(true)
         }
+        .onChange(of: hapticModeEnabled) { newValue in
+            analyzer.hapticsEnabled = newValue
+        }
+        .onChange(of: analyzer.phase) { newPhase in
+            if newPhase == .done, let report = analyzer.result {
+                appState.toneReport = report
+            }
+        }
+        .sheet(isPresented: $showingDetector) {
+            ChordDetectiveView()
+        }
+        .onDisappear {
+            analyzer.stop()
+        }
     }
-    
-    private func analyzeResults() -> String {
-        var analysis: [String] = []
-        
-        if recordedBass > 7 {
-            analysis.append("Your bass response is strong. Good for rock and metal.")
-        } else if recordedBass < 4 {
-            analysis.append("Your bass is weak. Check your speaker or boost bass knob.")
-        } else {
-            analysis.append("Your bass is balanced. Good for most genres.")
+
+    private var isTestActive: Bool {
+        switch analyzer.phase {
+        case .requesting, .listening, .tooQuiet: return true
+        default: return false
         }
-        
-        if recordedMid > 7 {
-            analysis.append("Your mids are prominent. Good for blues and classic rock.")
-        } else if recordedMid < 4 {
-            analysis.append("Your mids are scooped. Common for metal tones.")
-        } else {
-            analysis.append("Your mids are balanced. Versatile for many styles.")
+    }
+
+    private var canFinish: Bool {
+        analyzer.audibleSeconds >= 5.0
+    }
+
+    private var buttonLabel: String {
+        if !isTestActive { return "Start Analysis 🎸" }
+        if !canFinish {
+            return String(format: "Keep playing… %.0f s / 5 s", analyzer.audibleSeconds)
         }
-        
-        if recordedTreble > 7 {
-            analysis.append("Your treble is bright. Good for clean and funk tones.")
-        } else if recordedTreble < 4 {
-            analysis.append("Your treble is dark. May sound muddy for some songs.")
-        } else {
-            analysis.append("Your treble is warm. Good for most playing styles.")
+        return "Finish & See Results ⏹"
+    }
+
+    private var qualityBadge: String {
+        switch analyzer.audibleSeconds {
+        case 12...: return "⭐ Excellent"
+        case 6..<12: return "✅ Good"
+        case 3..<6: return "🟡 Basic"
+        default: return "⏳ Warming up"
         }
-        
-        return analysis.joined(separator: "\n")
+    }
+
+    private var statusMessage: String {
+        switch analyzer.phase {
+        case .idle: return "Tap to begin — then keep playing chords near the phone"
+        case .requesting: return "Asking for microphone access…"
+        case .listening: return "Keep playing! Press Finish when you've played enough"
+        case .tooQuiet: return "Too quiet — strum louder, closer to the mic"
+        case .denied: return "Microphone was blocked"
+        case .failed: return "Audio engine error"
+        case .done: return "Done! Full report below"
+        }
+    }
+
+    private var statusColor: Color {
+        switch analyzer.phase {
+        case .tooQuiet, .denied, .failed: return .ampPink
+        case .listening, .requesting: return .ampPurple
+        case .done: return .ampMint
+        default: return .textSecondary
+        }
+    }
+
+    private func interpretation(_ report: ToneReport) -> String {
+        var lines: [String] = []
+
+        switch report.toneCharacter {
+        case "Bass-heavy & warm":
+            lines.append("Most of the energy sits below 250 Hz. Great for thick rhythm tones; leads may sound muffled — try raising treble/presence.")
+        case "Bright & clear":
+            lines.append("Strong 2–8 kHz content. Clean and attack-forward; may get sharp on high-gain — try easing treble down.")
+        case "Mid-forward & punchy":
+            lines.append("Energy concentrated in the 250–2 kHz band where guitars 'cut' through a band mix.")
+        case "Scooped (V-shaped)":
+            lines.append("Classic metal voicing: heavy lows, recessed mids, bright attack.")
+        default:
+            lines.append("Energy is spread evenly across bass, mid and treble — an even, workable platform for any genre.")
+        }
+
+        if report.centroidHz > 0 {
+            if report.centroidHz < 350 {
+                lines.append(String(format: "Tone center ≈ %d Hz — a dark, warm reading.", Int(report.centroidHz)))
+            } else if report.centroidHz > 900 {
+                lines.append(String(format: "Tone center ≈ %d Hz — a bright, wiry reading.", Int(report.centroidHz)))
+            } else {
+                lines.append(String(format: "Tone center ≈ %d Hz — a natural midrange balance.", Int(report.centroidHz)))
+            }
+        }
+
+        if report.level > 0 && report.level < 0.45 {
+            lines.append("Reading taken at a modest volume, so quiet details may be under-represented.")
+        }
+
+        if report.sustainSeconds > 0 {
+            if report.sustainSeconds >= 1.5 {
+                lines.append(String(format: "Chords ring out for ≈ %.1f s — good sustain from the amp/speaker.", report.sustainSeconds))
+            } else {
+                lines.append(String(format: "Quick decay (≈ %.1f s) — tight, controlled response; raise volume or check speaker.", report.sustainSeconds))
+            }
+        }
+
+        if report.dynamics >= 2.0 {
+            lines.append(String(format: "Punchy dynamics (%.1fx peak/avg) — the amp responds to your touch.", report.dynamics))
+        } else if report.dynamics < 1.3 {
+            lines.append(String(format: "Compressed feel (%.1fx peak/avg) — high gain/saturation; good for metal, less touch-sensitive.", report.dynamics))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    @ViewBuilder
+    private func warningCard<Content: View>(icon: String, title: String, body: String, @ViewBuilder content: () -> Content = { EmptyView() }) -> some View {
+        VStack(spacing: 10) {
+            Text(icon).font(.system(size: 28))
+            Text(title)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundColor(.textPrimary)
+            Text(body)
+                .font(.system(size: 12, design: .rounded))
+                .foregroundColor(.textSecondary)
+                .multilineTextAlignment(.center)
+            content()
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .glassStyle(cornerRadius: 20)
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - 📊 Live Stat Chip
+
+struct LiveStatChip: View {
+    let icon: String
+    let value: String
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(icon).font(.system(size: 16))
+            Text(value)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundColor(.textPrimary)
+            Text(label)
+                .font(.system(size: 9, design: .rounded))
+                .foregroundColor(.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.35)))
+    }
+}
+
+// MARK: - 📊 Energy Share Row
+
+struct ShareRow: View {
+    let name: String
+    let share: Double // 0-1
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(name)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Text("\(Int(share * 100))% of energy")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.textSecondary)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color.opacity(0.15))
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color)
+                        .frame(width: geo.size.width * max(0.02, min(1.0, share * 2.2)))
+                }
+            }
+            .frame(height: 8)
+        }
+    }
+}
+
+// MARK: - 📊 Stat Tile
+
+struct StatTile: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(color)
+            Text(title)
+                .font(.system(size: 10, design: .rounded))
+                .foregroundColor(.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.35)))
     }
 }
 
@@ -1482,6 +2138,33 @@ struct SettingsView: View {
                     }
                     .padding(.horizontal)
                     
+                    // Accuracy & limits (honest)
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("🎯")
+                            Text("Accuracy & Limits")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundColor(.textPrimary)
+                            Spacer()
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Tone measurement: ~±1–2 on the 0–10 scale under consistent conditions. Phone mics and rooms vary; use it for RELATIVE comparisons (knob A vs knob B), not absolute amp identity.")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                            Text("Chord detection: experimental. ~60–75% on clean single chords played one at a time; much lower on strummed songs. Confidence is shown for every guess.")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                            Text("Compatibility scores are based on the controls/features you declare for your amp — fill them in honestly (or use Build Your Own Amp) for meaningful results.")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding()
+                    .glassStyle(cornerRadius: 20)
+                    .padding(.horizontal)
+
                     // About
                     VStack(spacing: 16) {
                         HStack {
@@ -1572,12 +2255,14 @@ struct PracticeModeView: View {
     @Environment(\.dismiss) var dismiss
     
     let song: Song
-    
+
     @State private var currentChordIndex = 0
-    @State private var isPlaying = false
     @State private var tempo: Double = 120
     @State private var showChords = true
     @State private var showStrumming = true
+    @State private var autoAdvance = true
+    @State private var recordedThisSession = false
+    @StateObject private var metronome = MetronomeEngine()
     
     var body: some View {
         NavigationView {
@@ -1649,9 +2334,19 @@ struct PracticeModeView: View {
                         .disabled(currentChordIndex == 0)
                         
                         Button(action: {
-                            isPlaying.toggle()
+                            if metronome.isPlaying {
+                                metronome.stop()
+                            } else {
+                                metronome.tempo = tempo
+                                metronome.start()
+                                // Progress counts only when an actual session starts.
+                                if !recordedThisSession {
+                                    appState.userProgress.recordPracticeSession(songTitle: song.title)
+                                    recordedThisSession = true
+                                }
+                            }
                         }) {
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            Image(systemName: metronome.isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 32))
                                 .foregroundColor(.white)
                                 .frame(width: 80, height: 80)
@@ -1665,6 +2360,8 @@ struct PracticeModeView: View {
                                             )
                                         )
                                 )
+                                .scaleEffect(metronome.isPlaying && metronome.beatInBar == 0 ? 1.08 : 1.0)
+                                .animation(.easeInOut(duration: 0.12), value: metronome.beatInBar)
                         }
                         
                         Button(action: {
@@ -1692,9 +2389,34 @@ struct PracticeModeView: View {
                                 .font(.system(size: 14, weight: .bold, design: .rounded))
                                 .foregroundColor(.ampPurple)
                         }
-                        
+
                         Slider(value: $tempo, in: 60...180, step: 5)
                             .tint(.ampPurple)
+                            .onChange(of: tempo) { newValue in
+                                metronome.tempo = newValue
+                            }
+                    }
+                    .padding()
+                    .glassStyle(cornerRadius: 16)
+                    .padding(.horizontal)
+
+                    // Metronome beat indicator + auto-advance
+                    VStack(spacing: 12) {
+                        HStack(spacing: 10) {
+                            ForEach(0..<4, id: \.self) { beat in
+                                Circle()
+                                    .fill(beat == metronome.beatInBar && metronome.isPlaying ? Color.ampPink : Color.ampPink.opacity(0.2))
+                                    .frame(width: 14, height: 14)
+                            }
+                            Spacer()
+                            Text("🔺 Auto-advance chords every 4 beats")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                            Toggle("", isOn: $autoAdvance)
+                                .labelsHidden()
+                                .tint(.ampPurple)
+                                .scaleEffect(0.8, anchor: .trailing)
+                        }
                     }
                     .padding()
                     .glassStyle(cornerRadius: 16)
@@ -1766,9 +2488,24 @@ struct PracticeModeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Done") { dismiss() }
+                    Button("Done") {
+                        metronome.stop()
+                        dismiss()
+                    }
                         .foregroundColor(.ampPurple)
                 }
+            }
+            .onChange(of: metronome.beatCount) { beats in
+                // Advance the chord card every 4 beats (one bar) while looping.
+                guard metronome.isPlaying, autoAdvance,
+                      beats > 0, beats % 4 == 0,
+                      !song.chords.isEmpty else { return }
+                withAnimation {
+                    currentChordIndex = (currentChordIndex + 1) % song.chords.count
+                }
+            }
+            .onDisappear {
+                metronome.stop()
             }
         }
     }
@@ -1837,5 +2574,596 @@ struct AmpCardSelectable: View {
             .glassStyle(cornerRadius: 16, opacity: isSelected ? 0.9 : 0.5)
         }
         .buttonStyle(PlainButtonStyle())
+    }
+}
+
+
+
+// MARK: - 🛠️ Custom Amp Builder
+
+struct CustomAmpView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) var dismiss
+
+    @State private var name = ""
+    @State private var brand = ""
+    @State private var watts = 20
+    @State private var maxGain = 5.0
+    @State private var hasBass = true
+    @State private var hasMid = true
+    @State private var hasTreble = true
+    @State private var hasPresence = false
+    @State private var canDoClean = true
+    @State private var canDoCrunch = true
+    @State private var canDoHighGain = false
+    @State private var canDoMetal = false
+    @State private var hasEffects = false
+    @State private var hasReverb = false
+    @State private var hasDelay = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Identity") {
+                    TextField("Amp name", text: $name)
+                    TextField("Brand", text: $brand)
+                    Stepper("Watts: \(watts)", value: $watts, in: 1...200)
+                }
+                Section("Controls your amp has") {
+                    Toggle("Bass", isOn: $hasBass)
+                    Toggle("Mid", isOn: $hasMid)
+                    Toggle("Treble", isOn: $hasTreble)
+                    Toggle("Presence", isOn: $hasPresence)
+                }
+                Section("Capabilities") {
+                    Toggle("Clean", isOn: $canDoClean)
+                    Toggle("Crunch", isOn: $canDoCrunch)
+                    Toggle("High Gain", isOn: $canDoHighGain)
+                    Toggle("Metal", isOn: $canDoMetal)
+                    Toggle("Effects", isOn: $hasEffects)
+                    Toggle("Reverb", isOn: $hasReverb)
+                    Toggle("Delay", isOn: $hasDelay)
+                }
+                Section("Max gain") {
+                    Slider(value: $maxGain, in: 1...10, step: 0.5)
+                    Text(String(format: "%.1f / 10", maxGain))
+                }
+            }
+            .navigationTitle("Build Your Amp")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") { save() }
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        let amp = GuitarAmp(
+            name: name.trimmingCharacters(in: .whitespaces),
+            brand: brand.trimmingCharacters(in: .whitespaces).isEmpty ? "Custom" : brand.trimmingCharacters(in: .whitespaces),
+            watts: watts,
+            features: AmpFeatures(canDoClean: canDoClean, canDoCrunch: canDoCrunch, canDoHighGain: canDoHighGain, canDoMetal: canDoMetal, hasEffects: hasEffects, hasReverb: hasReverb, hasDelay: hasDelay),
+            maxGain: maxGain,
+            hasBassControl: hasBass,
+            hasMidControl: hasMid,
+            hasTrebleControl: hasTreble,
+            hasPresenceControl: hasPresence,
+            description: "Custom amp added by you."
+        )
+        appState.customAmps.append(amp)
+        appState.selectedAmp = amp
+        dismiss()
+    }
+}
+
+// MARK: - 🎵 Custom Song Builder
+
+struct CustomSongView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) var dismiss
+
+    @State private var title = ""
+    @State private var artist = ""
+    @State private var genre = "Rock"
+    @State private var difficulty: Song.Difficulty = .medium
+    @State private var chordsText = ""
+    @State private var description = ""
+    @State private var gain = 5.0
+    @State private var bass = 5.0
+    @State private var mid = 5.0
+    @State private var treble = 5.0
+    @State private var presence = 5.0
+    @State private var volume = 5.0
+
+    private let genres = ["Rock", "Metal", "Blues", "Punk", "Ballad", "Classic Rock", "Other"]
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Song info") {
+                    TextField("Title", text: $title)
+                    TextField("Artist", text: $artist)
+                    Picker("Genre", selection: $genre) {
+                        ForEach(genres, id: \.self) { Text($0) }
+                    }
+                    Picker("Difficulty", selection: $difficulty) {
+                        ForEach(Song.Difficulty.allCases, id: \.self) { d in
+                            Text(d.rawValue).tag(d)
+                        }
+                    }
+                }
+                Section("Chords (comma separated, e.g. E5, G5, A5)") {
+                    TextField("Chords", text: $chordsText)
+                    Text("Chord diagrams won't be shown for custom chords; names are used for practice mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Section("Ideal amp settings") {
+                    SliderRow(label: "Gain", value: $gain)
+                    SliderRow(label: "Bass", value: $bass)
+                    SliderRow(label: "Mid", value: $mid)
+                    SliderRow(label: "Treble", value: $treble)
+                    SliderRow(label: "Presence", value: $presence)
+                    SliderRow(label: "Volume", value: $volume)
+                }
+                Section("Notes") {
+                    TextField("Description / tips", text: $description, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+            }
+            .navigationTitle("Add Song")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") { save() }
+                        .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        let chordNames = chordsText
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let chords = chordNames.map { Chord(name: $0) }
+
+        let song = Song(
+            title: title.trimmingCharacters(in: .whitespaces),
+            artist: artist.trimmingCharacters(in: .whitespaces).isEmpty ? "Unknown" : artist.trimmingCharacters(in: .whitespaces),
+            genre: genre,
+            difficulty: difficulty,
+            chords: chords,
+            idealSettings: AmpSettings(gain: gain, bass: bass, mid: mid, treble: treble, presence: presence, volume: volume),
+            description: description,
+            isCustom: true
+        )
+        appState.customSongs.append(song)
+        dismiss()
+    }
+}
+
+struct SliderRow: View {
+    let label: String
+    @Binding var value: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                Spacer()
+                Text(String(format: "%.1f", value))
+                    .foregroundColor(.ampPurple)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+            }
+            Slider(value: $value, in: 0...10, step: 0.5)
+                .tint(.ampPurple)
+        }
+    }
+}
+
+// MARK: - 🎼 Chord Detective (experimental)
+
+struct ChordDetectiveView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var detector = ChordDetector()
+
+    var body: some View {
+        NavigationView {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 20) {
+                    SectionHeader(
+                        emoji: "🎼",
+                        title: "Chord Detective",
+                        subtitle: "Experimental · real DSP, not ML"
+                    )
+                    .padding(.horizontal)
+
+                    // Honesty banner
+                    Text("This listens to your guitar and guesses each chord using chroma (pitch-class) template matching. It works best on CLEAN single chords played ONE AT A TIME with pauses. Strummed songs and polyphony are hard — expect low confidence. Nothing is faked; confidence is shown for every guess.")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundColor(.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                        .glassStyle(cornerRadius: 16)
+                        .padding(.horizontal)
+
+                    Button(action: {
+                        if detector.isListening { detector.stop() } else { detector.start() }
+                    }) {
+                        VStack(spacing: 10) {
+                            Image(systemName: detector.isListening ? "stop.fill" : "mic.fill")
+                                .font(.system(size: 28))
+                                .foregroundColor(.white)
+                            Text(detector.isListening ? "Stop" : "Start Listening")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                        }
+                        .frame(width: 120, height: 120)
+                        .background(
+                            Circle().fill(
+                                LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                        )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+
+                    if detector.isListening {
+                        VStack(spacing: 8) {
+                            Text("Live guess:")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                            Text(detector.liveGuess)
+                                .font(.system(size: 40, weight: .bold, design: .rounded))
+                                .foregroundColor(.ampPurple)
+                            Text(String(format: "Confidence: %.0f%%", detector.liveConfidence * 100))
+                                .font(.system(size: 13, design: .rounded))
+                                .foregroundColor(detector.liveConfidence >= 0.6 ? .ampMint : .ampPeach)
+
+                            // Chroma bars
+                            HStack(spacing: 4) {
+                                ForEach(0..<12, id: \.self) { i in
+                                    let val = detector.liveChroma.isEmpty ? 0 : detector.liveChroma[i]
+                                    VStack {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(Color.ampPurple)
+                                            .frame(width: 18, height: CGFloat(max(2, val * 60)))
+                                        Text(["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"][i])
+                                            .font(.system(size: 8, design: .monospaced))
+                                            .foregroundColor(.textSecondary)
+                                    }
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 20)
+                        .padding(.horizontal)
+                    }
+
+                    if !detector.detectedChords.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Detected sequence")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundColor(.textPrimary)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    ForEach(detector.detectedChords) { c in
+                                        VStack(spacing: 4) {
+                                            Text(c.name)
+                                                .font(.system(size: 20, weight: .bold, design: .rounded))
+                                                .foregroundColor(.ampPurple)
+                                            Text(String(format: "%.0f%%", c.confidence * 100))
+                                                .font(.system(size: 10, design: .rounded))
+                                                .foregroundColor(c.confidence >= 0.6 ? .ampMint : .ampPeach)
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .glassStyle(cornerRadius: 12)
+                                    }
+                                }
+                            }
+
+                            Button(action: saveAsSong) {
+                                Text("Save detected sequence as a Song 🎵")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 20)
+                                    .padding(.vertical, 10)
+                                    .background(Capsule().fill(LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .leading, endPoint: .trailing)))
+                            }
+                            .disabled(detector.detectedChords.isEmpty)
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 20)
+                        .padding(.horizontal)
+                    }
+
+                    Spacer(minLength: 80)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") {
+                        detector.stop()
+                        dismiss()
+                    }
+                    .foregroundColor(.ampPurple)
+                }
+            }
+            .onDisappear { detector.stop() }
+        }
+    }
+
+    private func saveAsSong() {
+        let chords = detector.detectedChords.map { Chord(name: $0.name) }
+        let song = Song(
+            title: "Detected \(Date().formatted(date: .abbreviated, time: .shortened))",
+            artist: "You",
+            genre: "Custom",
+            difficulty: .medium,
+            chords: chords,
+            idealSettings: .neutral,
+            description: "Chords detected by the experimental Chord Detective. Verify before relying on it.",
+            isCustom: true
+        )
+        appState.customSongs.append(song)
+        dismiss()
+    }
+}
+
+// MARK: - 🎵 Song Analyzer View
+
+struct SongAnalyzerView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var analyzer = SongAnalyzer()
+    @State private var showingFilePicker = false
+    @State private var selectedFileName: String = ""
+
+    var body: some View {
+        NavigationView {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 20) {
+                    SectionHeader(
+                        emoji: "🎵",
+                        title: "Song Analyzer",
+                        subtitle: "Upload a track — get chords, tone, playability"
+                    )
+                    .padding(.horizontal)
+
+                    Text("Pick an audio or video file (mp3, m4a, wav, mp4, mov). For videos the audio track is extracted first. The app separates harmonic (guitar/vocals) from percussive (drums), estimates BPM, recognizes a chord sequence, measures tone, and judges playability. Analysis runs on-device; first 90 s are analyzed. Results are an estimate — verify by ear.")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundColor(.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                        .glassStyle(cornerRadius: 16)
+                        .padding(.horizontal)
+
+                    Button(action: { showingFilePicker = true }) {
+                        HStack {
+                            Image(systemName: "doc.badge.plus")
+                            Text(selectedFileName.isEmpty ? "Choose Audio File" : selectedFileName)
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(Capsule().fill(LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .leading, endPoint: .trailing)))
+                    }
+                    .disabled(analyzer.isAnalyzing)
+                    .buttonStyle(PlainButtonStyle())
+
+                    if analyzer.isAnalyzing {
+                        VStack(spacing: 10) {
+                            ProgressView(value: analyzer.progress)
+                                .tint(.ampPurple)
+                            Text(analyzer.status)
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundColor(.textSecondary)
+                        }
+                        .padding()
+                        .glassStyle(cornerRadius: 16)
+                        .padding(.horizontal)
+                    }
+
+                    if let r = analyzer.result {
+                        resultCard(r)
+                    }
+
+                    Spacer(minLength: 80)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") { dismiss() }
+                        .foregroundColor(.ampPurple)
+                }
+            }
+            .fileImporter(
+                isPresented: $showingFilePicker,
+                allowedContentTypes: [.audio, .movie, .video, .mpeg4Movie, .quickTimeMovie, .avi],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    selectedFileName = url.lastPathComponent
+                    analyzer.analyze(url: url)
+                case .failure(let error):
+                    print("File import error: \(error)")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func resultCard(_ r: SongAnalysis) -> some View {
+        VStack(spacing: 16) {
+            Text("📊 Analysis: \(r.title)")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(.textPrimary)
+                .multilineTextAlignment(.center)
+
+            HStack(spacing: 12) {
+                StatTile(title: "Duration", value: String(format: "%.0f s", r.duration), color: .ampBlue)
+                StatTile(title: "BPM", value: String(format: "%.0f", r.bpm), color: .ampPurple)
+                StatTile(title: "Difficulty", value: r.playabilityDifficulty, color: .ampPink)
+            }
+
+            // Detected chords
+            VStack(alignment: .leading, spacing: 8) {
+                Text("🎼 Detected chord sequence")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                if r.detectedChords.isEmpty {
+                    Text("No confident chords detected. Try a cleaner mix or a guitar-only track.")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundColor(.textSecondary)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(Array(r.detectedChords.enumerated()), id: \.offset) { _, c in
+                                Text(c)
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                                    .foregroundColor(.ampPurple)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .glassStyle(cornerRadius: 10)
+                            }
+                        }
+                    }
+                    Text("Unique chords: \(r.detectedChords.count) · \(r.chordNamesTimeline.count) segments")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundColor(.textSecondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .glassStyle(cornerRadius: 16)
+
+            // Tone
+            VStack(alignment: .leading, spacing: 8) {
+                Text("🎛️ Estimated guitar tone (from the track)")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                FrequencyVisualizer(bass: r.toneBass, mid: r.toneMid, treble: r.toneTreble, label: "Measured from mix")
+                HStack {
+                    Text(String(format: "Gain ≈ %.1f/10", r.estimatedGain))
+                    Spacer()
+                    Text(String(format: "Sustain ≈ %.1f s", r.sustain))
+                    Spacer()
+                    Text(String(format: "Dynamics %.1fx", r.dynamics))
+                }
+                .font(.system(size: 11, design: .rounded))
+                .foregroundColor(.textSecondary)
+            }
+            .padding()
+            .glassStyle(cornerRadius: 16)
+
+            // Mix analysis
+            VStack(alignment: .leading, spacing: 8) {
+                Text("🎚️ Mix analysis")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                HStack {
+                    Text(String(format: "Harmonic (guitar/vocals): %.0f%%", r.harmonicRatio * 100))
+                    Spacer()
+                    Text(String(format: "Percussive (drums): %.0f%%", r.percussiveRatio * 100))
+                }
+                .font(.system(size: 12, design: .rounded))
+                .foregroundColor(.textSecondary)
+                Text("Instruments likely present:")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                    .padding(.top, 4)
+                ForEach(r.instruments, id: \.self) { inst in
+                    HStack(spacing: 6) {
+                        Text("•")
+                        Text(inst)
+                            .font(.system(size: 12, design: .rounded))
+                            .foregroundColor(.textSecondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .glassStyle(cornerRadius: 16)
+
+            // Playability
+            VStack(alignment: .leading, spacing: 8) {
+                Text("🎸 Playability on guitar")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                Text("Difficulty: \(r.playabilityDifficulty)")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundColor(r.playabilityDifficulty == "Easy" ? .ampMint : r.playabilityDifficulty == "Hard" ? .ampPink : .ampPeach)
+                Text("What you'll need:")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                    .padding(.top, 4)
+                ForEach(r.neededEquipment, id: \.self) { item in
+                    HStack(spacing: 6) {
+                        Text("•")
+                        Text(item)
+                            .font(.system(size: 12, design: .rounded))
+                            .foregroundColor(.textSecondary)
+                    }
+                }
+                Text("Notes:")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(.textPrimary)
+                    .padding(.top, 4)
+                ForEach(r.playabilityNotes, id: \.self) { n in
+                    Text("– \(n)")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundColor(.textSecondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .glassStyle(cornerRadius: 16)
+
+            Button(action: { saveAsSong(r) }) {
+                Text("Save as a Song 🎵")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(LinearGradient(colors: [.ampPurple, .ampPink], startPoint: .leading, endPoint: .trailing)))
+            }
+            .disabled(r.detectedChords.isEmpty)
+        }
+        .padding()
+        .glassStyle(cornerRadius: 20)
+        .padding(.horizontal)
+    }
+
+    private func saveAsSong(_ r: SongAnalysis) {
+        let chords = r.detectedChords.map { Chord(name: $0) }
+        let song = Song(
+            title: r.title,
+            artist: "Analyzed track",
+            genre: "Custom",
+            difficulty: r.playabilityDifficulty == "Easy" ? .easy : r.playabilityDifficulty == "Hard" ? .hard : .medium,
+            chords: chords,
+            idealSettings: AmpSettings(gain: r.estimatedGain, bass: r.toneBass, mid: r.toneMid, treble: r.toneTreble, presence: 5, volume: 5),
+            description: "Auto-analyzed from audio. Chords: \(r.detectedChords.joined(separator: ", ")). \(r.playabilityNotes.joined(separator: " "))",
+            isCustom: true
+        )
+        appState.customSongs.append(song)
+        dismiss()
     }
 }

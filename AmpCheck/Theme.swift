@@ -342,6 +342,102 @@ struct KnobVisual: View {
     }
 }
 
+// MARK: - 🎸 Real Fretboard Diagram
+//
+// Renders the actual chord finger positions from the song data instead of
+// decorative empty lines. Low E string is the top line, nut on the left.
+
+struct FretDiagramView: View {
+    let chord: Chord
+    var fretSpan: Int = 4
+
+    var body: some View {
+        Canvas { context, size in
+            let margin: CGFloat = 26
+            let strings = CGFloat(5)          // 6 strings → 5 gaps
+            let width = size.width - margin - 10
+            let height = size.height - margin - 12
+            let stringSpacing = height / strings
+            let fretSpacing = width / CGFloat(fretSpan)
+
+            let played = chord.frets.filter { $0 > 0 }
+            let highest = played.max() ?? 1
+            var base = 1
+            if highest > fretSpan {
+                base = (played.min() ?? 1)
+            }
+
+            // Strings (horizontal lines), low E on top.
+            for i in 0..<6 {
+                let y = margin + CGFloat(i) * stringSpacing
+                var path = Path()
+                path.move(to: CGPoint(x: margin, y: y))
+                path.addLine(to: CGPoint(x: margin + width, y: y))
+                context.stroke(path, with: .color(.textPrimary.opacity(0.6)), lineWidth: 1.5)
+            }
+
+            // Frets (vertical lines). Thick nut only if the chord is in first position.
+            for j in 0...fretSpan {
+                let x = margin + CGFloat(j) * fretSpacing
+                var path = Path()
+                path.move(to: CGPoint(x: x, y: margin))
+                path.addLine(to: CGPoint(x: x, y: margin + height))
+                if j == 0 && base == 1 {
+                    context.stroke(path, with: .color(.textPrimary), lineWidth: 6)
+                } else {
+                    context.stroke(path, with: .color(.textPrimary.opacity(0.35)), lineWidth: 1)
+                }
+            }
+
+            // Fret-number label (e.g. "5fr") when moved up the neck.
+            if base > 1 {
+                context.draw(
+                    Text("\(base)fr").font(.system(size: 9, design: .rounded)).foregroundColor(.textSecondary),
+                    at: CGPoint(x: margin + width + 4, y: margin + height / 2),
+                    anchor: .trailing
+                )
+            }
+
+            // Open / muted markers above the nut.
+            for (i, fret) in chord.frets.enumerated() {
+                let y = margin + CGFloat(i) * stringSpacing
+                let x = margin - 9
+                if fret == -1 {
+                    context.draw(
+                        Text("×").font(.system(size: 10, weight: .bold)).foregroundColor(.textSecondary),
+                        at: CGPoint(x: x, y: y)
+                    )
+                } else if fret == 0 {
+                    let circle = Path(ellipseIn: CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7))
+                    context.stroke(circle, with: .color(.textPrimary.opacity(0.7)), lineWidth: 1.5)
+                }
+            }
+
+            // Finger dots.
+            for (i, fret) in chord.frets.enumerated() {
+                guard fret > 0 else { continue }
+                let column = CGFloat(fret - base + 1)
+                let x = margin + (column - 0.5) * fretSpacing
+                let y = margin + CGFloat(i) * stringSpacing
+                let dotRadius: CGFloat = 9
+
+                let dot = Path(ellipseIn: CGRect(x: x - dotRadius, y: y - dotRadius, width: dotRadius * 2, height: dotRadius * 2))
+                context.fill(dot, with: .color(.ampPurple))
+                context.stroke(dot, with: .color(.white.opacity(0.6)), lineWidth: 1)
+
+                if i < chord.fingers.count, chord.fingers[i] > 0 {
+                    context.draw(
+                        Text("\(chord.fingers[i])")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white),
+                        at: CGPoint(x: x, y: y)
+                    )
+                }
+            }
+        }
+    }
+}
+
 // MARK: - 🎯 Priority Badge
 
 struct PriorityBadge: View {
